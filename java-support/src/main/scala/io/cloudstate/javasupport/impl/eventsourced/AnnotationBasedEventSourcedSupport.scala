@@ -1,3 +1,19 @@
+/*
+ * Copyright 2019 Lightbend Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.cloudstate.javasupport.impl.eventsourced
 
 import java.lang.reflect.{Constructor, InvocationTargetException, Method}
@@ -9,6 +25,7 @@ import io.cloudstate.javasupport.impl.{AnySupport, ReflectionHelper, ResolvedEnt
 
 import scala.collection.concurrent.TrieMap
 import com.google.protobuf.{Descriptors, Any => JavaPbAny}
+import io.cloudstate.javasupport.impl.eventsourced.EventSourcedImpl.EntityException
 import io.cloudstate.javasupport.{EntityFactory, ServiceCallFactory}
 
 /**
@@ -62,7 +79,7 @@ private[impl] class AnnotationBasedEventSourcedSupport(
           }
           handler.invoke(entity, event, ctx)
         case None =>
-          throw new RuntimeException(
+          throw EntityException(
             s"No event handler found for event ${event.getClass} on $behaviorsString"
           )
       }
@@ -72,7 +89,8 @@ private[impl] class AnnotationBasedEventSourcedSupport(
       behavior.commandHandlers.get(context.commandName()).map { handler =>
         handler.invoke(entity, command, context)
       } getOrElse {
-        throw new RuntimeException(
+        throw EntityException(
+          context,
           s"No command handler found for command [${context.commandName()}] on $behaviorsString"
         )
       }
@@ -88,7 +106,7 @@ private[impl] class AnnotationBasedEventSourcedSupport(
           }
           handler.invoke(entity, snapshot, ctx)
         case None =>
-          throw new RuntimeException(
+          throw EntityException(
             s"No snapshot handler found for snapshot ${snapshot.getClass} on $behaviorsString"
           )
       }
@@ -238,7 +256,8 @@ private object EventBehaviorReflection {
 
 private class EntityConstructorInvoker(constructor: Constructor[_])
     extends (EventSourcedEntityCreationContext => AnyRef) {
-  private val parameters = ReflectionHelper.getParameterHandlers[EventSourcedEntityCreationContext](constructor)()
+  private val parameters =
+    ReflectionHelper.getParameterHandlers[AnyRef, EventSourcedEntityCreationContext](constructor)()
   parameters.foreach {
     case MainArgumentParameterHandler(clazz) =>
       throw new RuntimeException(s"Don't know how to handle argument of type $clazz in constructor")
@@ -246,7 +265,7 @@ private class EntityConstructorInvoker(constructor: Constructor[_])
   }
 
   def apply(context: EventSourcedEntityCreationContext): AnyRef = {
-    val ctx = InvocationContext("", context)
+    val ctx = InvocationContext(null.asInstanceOf[AnyRef], context)
     constructor.newInstance(parameters.map(_.apply(ctx)): _*).asInstanceOf[AnyRef]
   }
 }
@@ -255,7 +274,7 @@ private class EventHandlerInvoker(val method: Method) {
 
   private val annotation = method.getAnnotation(classOf[EventHandler])
 
-  private val parameters = ReflectionHelper.getParameterHandlers[EventContext](method)()
+  private val parameters = ReflectionHelper.getParameterHandlers[AnyRef, EventContext](method)()
 
   private def annotationEventClass = annotation.eventClass() match {
     case obj if obj == classOf[Object] => None
@@ -293,7 +312,7 @@ private class EventHandlerInvoker(val method: Method) {
 private class SnapshotHandlerInvoker(val method: Method) {
   private val annotation = method.getAnnotation(classOf[SnapshotHandler])
 
-  private val parameters = ReflectionHelper.getParameterHandlers[SnapshotContext](method)()
+  private val parameters = ReflectionHelper.getParameterHandlers[AnyRef, SnapshotContext](method)()
 
   // Verify that there is at most one event handler
   val snapshotClass: Class[_] = parameters.collect {
@@ -315,7 +334,7 @@ private class SnapshotHandlerInvoker(val method: Method) {
 
 private class SnapshotInvoker(val method: Method) {
 
-  private val parameters = ReflectionHelper.getParameterHandlers[SnapshotContext](method)()
+  private val parameters = ReflectionHelper.getParameterHandlers[AnyRef, SnapshotContext](method)()
 
   parameters.foreach {
     case MainArgumentParameterHandler(clazz) =>
@@ -326,7 +345,7 @@ private class SnapshotInvoker(val method: Method) {
   }
 
   def invoke(obj: AnyRef, context: SnapshotContext): AnyRef = {
-    val ctx = InvocationContext("", context)
+    val ctx = InvocationContext(null.asInstanceOf[AnyRef], context)
     method.invoke(obj, parameters.map(_.apply(ctx)): _*)
   }
 

@@ -22,7 +22,7 @@ import akka.cluster.Cluster
 import akka.util.Timeout
 import akka.pattern.pipe
 import akka.stream.scaladsl.RunnableGraph
-import akka.http.scaladsl.{Http, HttpConnectionContext, UseHttp2}
+import akka.http.scaladsl.Http
 import akka.http.scaladsl.Http.ServerBinding
 import akka.cluster.singleton.{
   ClusterSingletonManager,
@@ -35,13 +35,11 @@ import akka.stream.Materializer
 import com.google.protobuf.DescriptorProtos
 import com.google.protobuf.Descriptors.{FileDescriptor, ServiceDescriptor}
 import com.typesafe.config.Config
+import io.cloudstate.protocol.action.ActionProtocol
 import io.cloudstate.protocol.entity._
 import io.cloudstate.protocol.crdt.Crdt
 import io.cloudstate.protocol.event_sourced.EventSourced
-import io.cloudstate.protocol.function.StatelessFunction
-import io.cloudstate.proxy.StatsCollector.StatsCollectorSettings
 import io.cloudstate.proxy.autoscaler.Autoscaler.ScalerFactory
-import io.cloudstate.proxy.ConcurrencyEnforcer.ConcurrencyEnforcerSettings
 import io.cloudstate.proxy.autoscaler.{
   Autoscaler,
   AutoscalerSettings,
@@ -50,17 +48,12 @@ import io.cloudstate.proxy.autoscaler.{
   NoAutoscaler,
   NoScaler
 }
+import io.cloudstate.proxy.action.ActionProtocolSupportFactory
 import io.cloudstate.proxy.crdt.CrdtSupportFactory
 import io.cloudstate.proxy.eventsourced.EventSourcedSupportFactory
-import io.cloudstate.proxy.eventing.EventingManager
-import io.cloudstate.proxy.function.StatelessFunctionSupportFactory
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
-
-//import io.cloudstate.protocol.entity.{ClientAction, EntityDiscovery, Failure, Reply, UserFunctionError}
-import io.cloudstate.protocol.entity.EntityDiscovery
-import io.cloudstate.proxy.EntityDiscoveryManager.ServableEntity
 
 object EntityDiscoveryManager {
   final case class Configuration(
@@ -76,8 +69,6 @@ object EntityDiscoveryManager {
       passivationTimeout: Timeout,
       numberOfShards: Int,
       proxyParallelism: Int,
-      concurrencySettings: ConcurrencyEnforcerSettings,
-      statsCollectorSettings: StatsCollectorSettings,
       journalEnabled: Boolean,
       config: Config
   ) {
@@ -95,12 +86,6 @@ object EntityDiscoveryManager {
            passivationTimeout = Timeout(config.getDuration("passivation-timeout").toMillis.millis),
            numberOfShards = config.getInt("number-of-shards"),
            proxyParallelism = config.getInt("proxy-parallelism"),
-           concurrencySettings = ConcurrencyEnforcerSettings(
-             concurrency = config.getInt("container-concurrency"),
-             actionTimeout = config.getDuration("action-timeout").toMillis.millis,
-             cleanupPeriod = config.getDuration("action-timeout-poll-period").toMillis.millis
-           ),
-           statsCollectorSettings = new StatsCollectorSettings(config.getConfig("stats")),
            journalEnabled = config.getBoolean("journal-enabled"),
            config = config)
     }
@@ -125,8 +110,8 @@ object EntityDiscoveryManager {
   final case object Ready // Responds with true / false
 
   final def proxyInfo(supportedEntityTypes: Seq[String]) = ProxyInfo(
-    protocolMajorVersion = 0,
-    protocolMinorVersion = 1,
+    protocolMajorVersion = BuildInfo.protocolMajorVersion,
+    protocolMinorVersion = BuildInfo.protocolMinorVersion,
     proxyName = BuildInfo.name,
     proxyVersion = BuildInfo.version,
     supportedEntityTypes = supportedEntityTypes
@@ -142,8 +127,8 @@ class EntityDiscoveryManager(config: EntityDiscoveryManager.Configuration)(
 ) extends Actor
     with ActorLogging {
 
-  implicit val system = context.system
-  implicit val ec = context.dispatcher
+  private[this] implicit val system = context.system
+  private[this] implicit val ec = context.dispatcher
   import EntityDiscoveryManager.Ready
 
   private[this] final val clientSettings =
@@ -165,7 +150,7 @@ class EntityDiscoveryManager(config: EntityDiscoveryManager.Configuration)(
 
       val singleton = context.actorOf(
         ClusterSingletonManager.props(
-          Autoscaler.props(autoscalerSettings, scalerFactory, new ClusterMembershipFacadeImpl(Cluster(context.system))),
+          Autoscaler.props(autoscalerSettings, scalerFactory, new ClusterMembershipFacadeImpl(Cluster(system))),
           terminationMessage = PoisonPill,
           managerSettings
         ),
@@ -178,42 +163,40 @@ class EntityDiscoveryManager(config: EntityDiscoveryManager.Configuration)(
       context.actorOf(Props(new NoAutoscaler), "noAutoscaler")
     }
   }
-  private[this] final val statsCollector =
-    context.actorOf(StatsCollector.props(config.statsCollectorSettings, autoscaler), "statsCollector")
-  private[this] final val concurrencyEnforcer =
-    context.actorOf(ConcurrencyEnforcer.props(config.concurrencySettings, statsCollector), "concurrencyEnforcer")
 
   private final val supportFactories: Map[String, UserFunctionTypeSupportFactory] = Map(
-      Crdt.name -> new CrdtSupportFactory(context.system,
-                                          config,
-                                          entityDiscoveryClient,
-                                          clientSettings,
-                                          concurrencyEnforcer = concurrencyEnforcer,
-                                          statsCollector = statsCollector),
-      StatelessFunction.name -> new StatelessFunctionSupportFactory(context.system,
-                                                                    config,
-                                                                    clientSettings,
-                                                                    concurrencyEnforcer = concurrencyEnforcer,
-                                                                    statsCollector = statsCollector)
+      Crdt.name -> new CrdtSupportFactory(system, config, entityDiscoveryClient, clientSettings),
+      ActionProtocol.name -> new ActionProtocolSupportFactory(system, config, clientSettings)
     ) ++ {
       if (config.journalEnabled)
         Map(
-          EventSourced.name -> new EventSourcedSupportFactory(context.system,
-                                                              config,
-                                                              clientSettings,
-                                                              concurrencyEnforcer = concurrencyEnforcer,
-                                                              statsCollector = statsCollector)
+          EventSourced.name -> new EventSourcedSupportFactory(system, config, clientSettings)
         )
       else Map.empty
     }
 
   entityDiscoveryClient.discover(EntityDiscoveryManager.proxyInfo(supportFactories.keys.toSeq)) pipeTo self
 
+  val supportedProtocolMajorVersion: Int = BuildInfo.protocolMajorVersion
+  val supportedProtocolMinorVersion: Int = BuildInfo.protocolMinorVersion
+  val supportedProtocolVersionString: String = s"${supportedProtocolMajorVersion}.${supportedProtocolMinorVersion}"
+
+  def compatibleProtocol(majorVersion: Int, minorVersion: Int): Boolean =
+    // allow empty protocol version to be compatible, until all library supports report their protocol version
+    ((majorVersion == 0) && (minorVersion == 0)) ||
+    // otherwise it's currently strict matching of protocol versions
+    ((majorVersion == supportedProtocolMajorVersion) && (minorVersion == supportedProtocolMinorVersion))
+
   override def receive: Receive = {
     case spec: EntitySpec =>
       log.info("Received EntitySpec from user function with info: {}", spec.getServiceInfo)
 
       try {
+        if (!compatibleProtocol(spec.getServiceInfo.protocolMajorVersion, spec.getServiceInfo.protocolMinorVersion))
+          throw EntityDiscoveryException(
+            s"Incompatible protocol version ${spec.getServiceInfo.protocolMajorVersion}.${spec.getServiceInfo.protocolMinorVersion}, only $supportedProtocolVersionString is supported"
+          )
+
         val descriptorSet = DescriptorProtos.FileDescriptorSet.parseFrom(spec.proto)
         val descriptors = FileDescriptorBuilder.build(descriptorSet)
 
@@ -245,10 +228,10 @@ class EntityDiscoveryManager(config: EntityDiscoveryManager.Configuration)(
 
         val router = new UserFunctionRouter(entities, entityDiscoveryClient)
 
+        /*
         val eventSupport = EventingManager.createSupport(config.getConfig("eventing"))
-
-        val (route, eventingGraph) =
-          Serve.createRoute(entities, router, statsCollector, entityDiscoveryClient, descriptors, eventSupport)
+         */
+        val route = Serve.createRoute(entities, router, entityDiscoveryClient, descriptors, Map.empty)
 
         log.debug("Starting gRPC proxy")
 
@@ -261,10 +244,7 @@ class EntityDiscoveryManager(config: EntityDiscoveryManager.Configuration)(
           ) pipeTo self
         }
 
-        // Start warmup
-        system.actorOf(Warmup.props(spec.entities.exists(_.entityType == EventSourced.name)), "state-manager-warm-up")
-
-        context.become(binding(eventingGraph))
+        context.become(binding(None))
 
       } catch {
         case e @ EntityDiscoveryException(message) =>

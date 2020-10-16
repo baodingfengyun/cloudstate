@@ -23,6 +23,7 @@ object OperatorConstants {
   final val CloudStateApiVersionNumber = "v1alpha1"
   final val CloudStateApiVersion = s"$CloudStateGroup/$CloudStateApiVersionNumber"
   final val StatefulServiceKind = "StatefulService"
+  final val StatefulStoreKind = "StatefulStore"
   final val StatefulStoreLabel = s"$CloudStateGroup/statefulStore"
 
   final val StatefulServiceLabel = s"$CloudStateGroup/statefulService"
@@ -82,5 +83,6 @@ object OperatorConstants {
   final val AkkaManagementPort = 8558
   final val AkkaRemotingPort = 2552
   final val MetricsPort = 9090
-  final val MetricsPortName = "queue-metrics"
+  final val MetricsPortName = "metrics"
+  final val MetricsPortEnvVar = "METRICS_PORT"
 }

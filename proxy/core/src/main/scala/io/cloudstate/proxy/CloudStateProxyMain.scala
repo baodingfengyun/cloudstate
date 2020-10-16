@@ -28,12 +28,12 @@ import akka.management.cluster.bootstrap.ClusterBootstrap
 import akka.management.scaladsl.AkkaManagement
 import akka.pattern.{BackoffOpts, BackoffSupervisor}
 import akka.stream.SystemMaterializer
+import io.cloudstate.proxy.telemetry.CloudstateTelemetry
 import org.slf4j.LoggerFactory
 import sun.misc.Signal
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.util.{Failure, Success}
 
 final class HealthCheckReady(system: ActorSystem) extends (() => Future[Boolean]) {
   private[this] final val log = LoggerFactory.getLogger(getClass)
@@ -41,7 +41,6 @@ final class HealthCheckReady(system: ActorSystem) extends (() => Future[Boolean]
     system.settings.config.getConfig("cloudstate.proxy").getDuration("ready-timeout").toMillis.millis
   private[this] final implicit val ec = system.dispatcher
   private[this] final val serverManager = system.actorSelection("/user/server-manager-supervisor/server-manager")
-  private[this] final val warmup = system.actorSelection("/user/state-manager-warm-up")
   private[this] final implicit val timeout = Timeout(timeoutMs)
 
   private[this] final def check(name: String, selection: ActorSelection, msg: Any) =
@@ -59,7 +58,6 @@ final class HealthCheckReady(system: ActorSystem) extends (() => Future[Boolean]
     Future
       .sequence(
         Seq(
-          check("warmup", warmup, Warmup.Ready),
           check("server manager", serverManager, EntityDiscoveryManager.Ready)
         )
       )
@@ -76,8 +74,7 @@ object CloudStateProxyMain {
       devMode: Boolean,
       backoffMin: FiniteDuration,
       backoffMax: FiniteDuration,
-      backoffRandomFactor: Double,
-      metricsPort: Int
+      backoffRandomFactor: Double
   ) {
     validate()
     def this(config: Config) = {
@@ -85,8 +82,7 @@ object CloudStateProxyMain {
         devMode = config.getBoolean("dev-mode-enabled"),
         backoffMin = config.getDuration("backoff.min").toMillis.millis,
         backoffMax = config.getDuration("backoff.max").toMillis.millis,
-        backoffRandomFactor = config.getDouble("backoff.random-factor"),
-        metricsPort = config.getInt("metrics-port")
+        backoffRandomFactor = config.getDouble("backoff.random-factor")
       )
     }
 
@@ -143,6 +139,10 @@ object CloudStateProxyMain {
     implicit val materializer = SystemMaterializer(system)
     import system.dispatcher
 
+    val jvmName = sys.props.get("java.runtime.name").orElse(sys.props.get("java.vm.name")).getOrElse("")
+    val jvmVersion = sys.props.get("java.runtime.version").orElse(sys.props.get("java.vm.version")).getOrElse("")
+    system.log.info(s"Starting Cloudstate Proxy version [${BuildInfo.version}] running on [$jvmName $jvmVersion]")
+
     val c = system.settings.config.getConfig("cloudstate.proxy")
     val serverConfig = new EntityDiscoveryManager.Configuration(c)
     val appConfig = new CloudStateProxyMain.Configuration(c)
@@ -171,16 +171,9 @@ object CloudStateProxyMain {
       // Start cluster bootstrap
       AkkaManagement(system).start()
       ClusterBootstrap(system).start()
-
-      // Start Prometheus exporter in prod mode
-      new AkkaHttpPrometheusExporter(appConfig.metricsPort).start().onComplete {
-        case Success(binding) =>
-          system.log.info("Prometheus exporter started on {}", binding.localAddress)
-        case Failure(error) =>
-          system.log.error(error, "Error starting Prometheus exporter!")
-          system.terminate()
-      }
     }
+
+    CloudstateTelemetry(system).start()
 
     system.actorOf(
       BackoffSupervisor.props(

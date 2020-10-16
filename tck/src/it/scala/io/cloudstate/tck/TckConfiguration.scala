@@ -1,3 +1,19 @@
+/*
+ * Copyright 2019 Lightbend Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.cloudstate.tck
 
 import java.io.File
@@ -12,7 +28,8 @@ final case class TckProcessConfig private (
     command: List[String],
     stopCommand: Option[List[String]],
     envVars: Map[String, String],
-    dockerImage: String
+    dockerImage: String,
+    dockerArgs: List[String],
 ) {
   def validate(): Unit =
     if (dockerImage.nonEmpty) {
@@ -36,19 +53,20 @@ object TckProcessConfig {
       envVars = config.getConfig("env-vars").root.unwrapped.asScala.toMap.map {
         case (key, value: AnyRef) => key -> value.toString
       },
-      dockerImage = config.getString("docker-image")
+      dockerImage = config.getString("docker-image"),
+      dockerArgs = config.getStringList("docker-args").asScala.toList
     )
 }
 
 final case class TckConfiguration private (name: String,
                                            proxy: TckProcessConfig,
-                                           frontend: TckProcessConfig,
+                                           service: TckProcessConfig,
                                            tckHostname: String,
                                            tckPort: Int) {
 
   def validate(): Unit = {
     proxy.validate()
-    frontend.validate()
+    service.validate()
     // FIXME implement
   }
 }
@@ -60,7 +78,7 @@ object TckConfiguration {
     TckConfiguration(
       name = c.getString("name"),
       proxy = TckProcessConfig.parseFrom(c.getConfig("proxy")),
-      frontend = TckProcessConfig.parseFrom(c.getConfig("frontend")),
+      service = TckProcessConfig.parseFrom(c.getConfig("service")),
       tckHostname = c.getString("tck.hostname"),
       tckPort = c.getInt("tck.port")
     )

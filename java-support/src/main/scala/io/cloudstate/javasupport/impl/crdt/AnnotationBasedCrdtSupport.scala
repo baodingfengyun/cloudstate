@@ -1,3 +1,19 @@
+/*
+ * Copyright 2019 Lightbend Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.cloudstate.javasupport.impl.crdt
 
 import java.lang.reflect.{Constructor, Executable, InvocationTargetException}
@@ -5,9 +21,8 @@ import java.util.{function, Optional}
 import java.util.function.Consumer
 
 import scala.annotation.unchecked
-
 import com.google.protobuf.{Descriptors, Any => JavaPbAny}
-import io.cloudstate.javasupport.{Context, EntityFactory, ServiceCall, ServiceCallFactory}
+import io.cloudstate.javasupport.{Context, EntityFactory, Metadata, ServiceCall, ServiceCallFactory}
 import io.cloudstate.javasupport.crdt.{
   CommandContext,
   CommandHandler,
@@ -194,7 +209,7 @@ private object CrdtAnnotationHelper {
     }
 
   def crdtParameterHandlers[C <: CrdtContext with CrdtFactory]
-      : PartialFunction[MethodParameter, ParameterHandler[C]] = {
+      : PartialFunction[MethodParameter, ParameterHandler[AnyRef, C]] = {
     case crdt if injectorMap.contains(crdt.parameterType) =>
       new CrdtParameterHandler[C, Crdt, AnyRef](injectorMap(crdt.parameterType), crdt.method)
     case crdt
@@ -208,8 +223,8 @@ private object CrdtAnnotationHelper {
 
   private class CrdtParameterHandler[C <: CrdtContext with CrdtFactory, D <: Crdt, T](injector: CrdtInjector[D, T],
                                                                                       method: Executable)
-      extends ParameterHandler[C] {
-    override def apply(ctx: InvocationContext[C]): AnyRef = {
+      extends ParameterHandler[AnyRef, C] {
+    override def apply(ctx: InvocationContext[AnyRef, C]): AnyRef = {
       val state = ctx.context.state(injector.crdtClass)
       if (state.isPresent) {
         injector.wrap(state.get()).asInstanceOf[AnyRef]
@@ -220,10 +235,10 @@ private object CrdtAnnotationHelper {
   }
 
   private class OptionalCrdtParameterHandler[C <: Crdt, T](injector: CrdtInjector[C, T], method: Executable)
-      extends ParameterHandler[CrdtContext] {
+      extends ParameterHandler[AnyRef, CrdtContext] {
 
     import scala.compat.java8.OptionConverters._
-    override def apply(ctx: InvocationContext[CrdtContext]): AnyRef =
+    override def apply(ctx: InvocationContext[AnyRef, CrdtContext]): AnyRef =
       ctx.context.state(injector.crdtClass).asScala.map(injector.wrap).asJava
   }
 
@@ -256,6 +271,7 @@ private final class AdaptedStreamedCommandContext(val delegate: StreamedCommandC
   override def entityId(): String = delegate.entityId()
   override def commandId(): Long = delegate.commandId()
   override def commandName(): String = delegate.commandName()
+  override def metadata(): Metadata = delegate.metadata()
 
   override def state[T <: Crdt](crdtClass: Class[T]): Optional[T] = delegate.state(crdtClass)
   override def delete(): Unit = delegate.delete()
@@ -276,7 +292,9 @@ private final class AdaptedStreamedCommandContext(val delegate: StreamedCommandC
 
 private final class EntityConstructorInvoker(constructor: Constructor[_]) extends (CrdtCreationContext => AnyRef) {
   private val parameters =
-    ReflectionHelper.getParameterHandlers[CrdtCreationContext](constructor)(CrdtAnnotationHelper.crdtParameterHandlers)
+    ReflectionHelper.getParameterHandlers[AnyRef, CrdtCreationContext](constructor)(
+      CrdtAnnotationHelper.crdtParameterHandlers
+    )
   parameters.foreach {
     case MainArgumentParameterHandler(clazz) =>
       throw new RuntimeException(s"Don't know how to handle argument of type $clazz in constructor")
@@ -284,7 +302,7 @@ private final class EntityConstructorInvoker(constructor: Constructor[_]) extend
   }
 
   def apply(context: CrdtCreationContext): AnyRef = {
-    val ctx = InvocationContext("", context)
+    val ctx = InvocationContext(null.asInstanceOf[AnyRef], context)
     constructor.newInstance(parameters.map(_.apply(ctx)): _*).asInstanceOf[AnyRef]
   }
 }

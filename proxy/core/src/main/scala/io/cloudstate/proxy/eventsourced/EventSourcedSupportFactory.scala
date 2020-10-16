@@ -1,3 +1,19 @@
+/*
+ * Copyright 2019 Lightbend Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.cloudstate.proxy.eventsourced
 
 import akka.NotUsed
@@ -10,7 +26,7 @@ import akka.stream.Materializer
 import akka.stream.scaladsl.{Flow, Source}
 import akka.util.Timeout
 import com.google.protobuf.Descriptors.ServiceDescriptor
-import io.cloudstate.protocol.entity.Entity
+import io.cloudstate.protocol.entity.{Entity, Metadata}
 import io.cloudstate.protocol.event_sourced.EventSourcedClient
 import io.cloudstate.proxy._
 import io.cloudstate.proxy.entity.{EntityCommand, UserFunctionReply}
@@ -18,16 +34,16 @@ import io.cloudstate.proxy.entity.{EntityCommand, UserFunctionReply}
 import scala.concurrent.{ExecutionContext, Future}
 import scala.collection.JavaConverters._
 
-class EventSourcedSupportFactory(system: ActorSystem,
-                                 config: EntityDiscoveryManager.Configuration,
-                                 grpcClientSettings: GrpcClientSettings,
-                                 concurrencyEnforcer: ActorRef,
-                                 statsCollector: ActorRef)(implicit ec: ExecutionContext, mat: Materializer)
+class EventSourcedSupportFactory(
+    system: ActorSystem,
+    config: EntityDiscoveryManager.Configuration,
+    grpcClientSettings: GrpcClientSettings
+)(implicit ec: ExecutionContext, mat: Materializer)
     extends EntityTypeSupportFactory {
 
   private final val log = Logging.getLogger(system, this.getClass)
 
-  private val eventSourcedClient = EventSourcedClient(grpcClientSettings)
+  private val eventSourcedClient = EventSourcedClient(grpcClientSettings)(system)
 
   override def buildEntityTypeSupport(entity: Entity,
                                       serviceDescriptor: ServiceDescriptor,
@@ -44,8 +60,7 @@ class EventSourcedSupportFactory(system: ActorSystem,
     val clusterShardingSettings = ClusterShardingSettings(system)
     val eventSourcedEntity = clusterSharding.start(
       typeName = entity.persistenceId,
-      entityProps =
-        EventSourcedEntitySupervisor.props(eventSourcedClient, stateManagerConfig, concurrencyEnforcer, statsCollector),
+      entityProps = EventSourcedEntitySupervisor.props(eventSourcedClient, stateManagerConfig),
       settings = clusterShardingSettings,
       messageExtractor = new EntityIdExtractor(config.numberOfShards),
       allocationStrategy = new DynamicLeastShardAllocationStrategy(1, 10, 2, 0.0),
@@ -82,8 +97,13 @@ private class EventSourcedSupport(eventSourcedEntity: ActorRef,
     extends EntityTypeSupport {
   import akka.pattern.ask
 
-  override def handler(method: EntityMethodDescriptor): Flow[EntityCommand, UserFunctionReply, NotUsed] =
-    Flow[EntityCommand].mapAsync(parallelism)(command => (eventSourcedEntity ? command).mapTo[UserFunctionReply])
+  override def handler(method: EntityMethodDescriptor,
+                       metadata: Metadata): Flow[EntityCommand, UserFunctionReply, NotUsed] =
+    Flow[EntityCommand].mapAsync(parallelism)(
+      command =>
+        (eventSourcedEntity ? EntityTypeSupport.mergeStreamLevelMetadata(metadata, command))
+          .mapTo[UserFunctionReply]
+    )
 
   override def handleUnary(command: EntityCommand): Future[UserFunctionReply] =
     (eventSourcedEntity ? command).mapTo[UserFunctionReply]

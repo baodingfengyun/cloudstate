@@ -1,3 +1,19 @@
+/*
+ * Copyright 2019 Lightbend Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.cloudstate.javasupport.impl
 
 import com.fasterxml.jackson.databind.{ObjectReader, ObjectWriter}
@@ -6,10 +22,10 @@ import com.google.protobuf.{
   Descriptors,
   Parser,
   UnsafeByteOperations,
-  Message => JavaMessage,
-  Any => JavaPbAny
+  Any => JavaPbAny,
+  Message => JavaMessage
 }
-import io.cloudstate.javasupport.{ServiceCall, ServiceCallRef}
+import io.cloudstate.javasupport.{Metadata, ServiceCall, ServiceCallRef}
 
 /**
  * A resolved service method.
@@ -24,16 +40,17 @@ final case class ResolvedServiceMethod[I, O](descriptor: Descriptors.MethodDescr
 
   override def method(): Descriptors.MethodDescriptor = descriptor
 
-  override def createCall(message: I): ServiceCall =
+  override def createCall(message: I, metadata: Metadata): ServiceCall =
     ResolvedServiceCall(this,
                         JavaPbAny
                           .newBuilder()
                           .setTypeUrl(inputType.typeUrl)
                           .setValue(inputType.toByteString(message))
-                          .build())
+                          .build(),
+                        metadata)
 }
 
-final case class ResolvedServiceCall(ref: ServiceCallRef[_], message: JavaPbAny) extends ServiceCall
+final case class ResolvedServiceCall(ref: ServiceCallRef[_], message: JavaPbAny, metadata: Metadata) extends ServiceCall
 
 /**
  * A resolved type

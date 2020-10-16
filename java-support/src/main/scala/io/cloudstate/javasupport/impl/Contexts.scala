@@ -1,3 +1,19 @@
+/*
+ * Copyright 2019 Lightbend Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
 package io.cloudstate.javasupport.impl
 
 import java.util.Optional
@@ -22,12 +38,12 @@ private[impl] trait AbstractEffectContext extends EffectContext {
 
   override final def effect(effect: ServiceCall, synchronous: Boolean): Unit = {
     checkActive()
-    SideEffect(
-      serviceName = effect.ref().method().getService.getFullName,
-      commandName = effect.ref().method().getName,
-      payload = Some(ScalaPbAny.fromJavaProto(effect.message())),
-      synchronous = synchronous
-    ) :: effects
+    effects = SideEffect(
+        serviceName = effect.ref().method().getService.getFullName,
+        commandName = effect.ref().method().getName,
+        payload = Some(ScalaPbAny.fromJavaProto(effect.message())),
+        synchronous = synchronous
+      ) :: effects
   }
 
   final def sideEffects: List[SideEffect] = effects.reverse
@@ -45,6 +61,7 @@ private[impl] trait AbstractClientActionContext extends ClientActionContext {
     checkActive()
     if (error.isEmpty) {
       error = Some(errorMessage)
+      logError(errorMessage)
       throw FailInvoked
     } else throw new IllegalStateException("fail(…) already previously invoked!")
   }
@@ -65,9 +82,13 @@ private[impl] trait AbstractClientActionContext extends ClientActionContext {
 
   final def hasError: Boolean = error.isDefined
 
-  final def createClientAction(reply: Optional[JavaPbAny], allowNoReply: Boolean): Option[ClientAction] =
+  protected def logError(message: String): Unit = ()
+
+  final def createClientAction(reply: Optional[JavaPbAny],
+                               allowNoReply: Boolean,
+                               restartOnFailure: Boolean): Option[ClientAction] =
     error match {
-      case Some(msg) => Some(ClientAction(ClientAction.Action.Failure(Failure(commandId, msg))))
+      case Some(msg) => Some(ClientAction(ClientAction.Action.Failure(Failure(commandId, msg, restartOnFailure))))
       case None =>
         if (reply.isPresent) {
           if (forward.isDefined) {
